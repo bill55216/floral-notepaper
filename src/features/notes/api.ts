@@ -43,6 +43,14 @@ export function deleteNote(id: string): Promise<void> {
   return invoke("notes_delete", { id });
 }
 
+export function getCompletedLines(id: string): Promise<string[]> {
+  return invoke("notes_completed_lines_get", { id });
+}
+
+export function setCompletedLines(id: string, lines: string[]): Promise<void> {
+  return invoke("notes_completed_lines_set", { id, lines });
+}
+
 export function moveNoteCategory(id: string, category: string): Promise<NoteMetadata> {
   return invoke("notes_move_category", { id, category });
 }

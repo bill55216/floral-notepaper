@@ -198,7 +198,8 @@
     "tooltip": {
       "close": "Close",
       "openInEditor": "Open in Editor",
-      "pinToTile": "Pin to Tile"
+      "pinToTile": "Pin to Tile",
+      "toggleDone": "Mark done / undone (strikethrough, Ctrl+Shift+X)"
     }
   },
   "settings": {

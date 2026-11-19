@@ -3,6 +3,8 @@ import type { MouseEvent } from "react";
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { createNote, getErrorMessage, getNote, listNotes, updateNote } from "../features/notes/api";
+import { getCompletedLines, setCompletedLines } from "../features/notes/api";
+import { lineKeysInSelection, toggleCompletedLines } from "../features/notes/completion";
 import { useImagePaste } from "../features/images/useImagePaste";
 import { useImageBaseDir } from "../features/images/useImageBaseDir";
 import { reportInstallPreparation } from "../features/update/api";
@@ -51,6 +53,7 @@ import {
   tileSurfaceModeUnpinNoteId,
 } from "../features/windows/tileWindowEvents";
 import { NotepadOpenPanel } from "./NotepadOpenPanel";
+import { StrikeOverlay } from "./StrikeOverlay";
 import { Tile } from "./Tile";
 
 type OpenMode = "new" | "open";
@@ -132,6 +135,8 @@ export function NotePad({
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
+  const [completedLines, setCompletedLinesState] = useState<string[]>([]);
+  const [editorSelection, setEditorSelection] = useState({ start: 0, end: 0 });
   const [status, setStatus] = useState<NotePadStatus>("empty");
   const [noteSurfaceAutoSave, setNoteSurfaceAutoSave] = useState(initialAutoSave);
   const [tileColorRaw, setTileColorRaw] = useState(normalizeTileColor(initialTileColor));
@@ -151,6 +156,11 @@ export function NotePad({
   const statusRef = useRef<NotePadStatus>("empty");
   const contentValueRef = useRef(content);
   contentValueRef.current = content;
+  const completedLinesRef = useRef(completedLines);
+  completedLinesRef.current = completedLines;
+  // 新建笔记还没有 id 时先暂存完成标记，保存拿到 id 后再落盘
+  const pendingCompletedLinesRef = useRef<string[] | null>(null);
+  const padEditorActiveRef = useRef(false);
   const titleValueRef = useRef(title);
   titleValueRef.current = title;
   const tileColorModeRef = useRef(tileColorMode);
@@ -201,6 +211,57 @@ export function NotePad({
     setMode("new");
     setStatus("opened");
   }, []);
+
+  // 打开笔记时加载它的完成标记（存在数据目录的 completed-lines.json 里）
+  useEffect(() => {
+    let cancelled = false;
+    if (!editingNoteId) {
+      setCompletedLinesState([]);
+      return () => {
+        cancelled = true;
+      };
+    }
+    getCompletedLines(editingNoteId)
+      .then((lines) => {
+        if (!cancelled) setCompletedLinesState(lines);
+      })
+      .catch(() => {
+        if (!cancelled) setCompletedLinesState([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [editingNoteId]);
+
+  const commitCompletedLines = useCallback(
+    (next: string[]) => {
+      setCompletedLinesState(next);
+      if (!editingNoteId) {
+        pendingCompletedLinesRef.current = next;
+        return;
+      }
+      void setCompletedLines(editingNoteId, next).catch((error) => {
+        showToast(getErrorMessage(error));
+      });
+    },
+    [editingNoteId],
+  );
+
+  const handleToggleCompletedLines = useCallback(() => {
+    const textarea = contentRef.current;
+    const start = textarea?.selectionStart ?? content.length;
+    const end = textarea?.selectionEnd ?? content.length;
+    const keys = lineKeysInSelection(content, start, end);
+    if (keys.length === 0) return;
+    commitCompletedLines(toggleCompletedLines(completedLinesRef.current, keys));
+    if (textarea) {
+      textarea.focus();
+      textarea.setSelectionRange(start, end);
+    }
+  }, [commitCompletedLines, content]);
+
+  const toggleCompletedLinesRef = useRef(handleToggleCompletedLines);
+  toggleCompletedLinesRef.current = handleToggleCompletedLines;
 
   useEffect(() => {
     let cancelled = false;
@@ -270,7 +331,6 @@ export function NotePad({
       tileRenderMarkdown?: boolean;
       tileDoubleClickToEdit?: boolean;
       tileSaveReturnsToPin?: boolean;
-      noteSurfaceAutoSave?: boolean;
     }>("config-changed", (event) => {
       const mode = event.payload.tileColorMode ?? tileColorModeRef.current;
       const raw = event.payload.tileColor ?? tileColorRawRef.current;
@@ -284,8 +344,6 @@ export function NotePad({
         setTileDoubleClickToEdit(event.payload.tileDoubleClickToEdit);
       if (event.payload.tileSaveReturnsToPin != null)
         setTileSaveReturnsToPin(event.payload.tileSaveReturnsToPin);
-      if (event.payload.noteSurfaceAutoSave != null)
-        setNoteSurfaceAutoSave(event.payload.noteSurfaceAutoSave);
     });
     return () => {
       void unlisten.then((fn) => fn());
@@ -342,6 +400,19 @@ export function NotePad({
     const note = editingNoteId
       ? await updateNote(editingNoteId, request)
       : await createNote(request);
+
+    // 新建笔记的完成标记先写盘，再切到新 id，避免随后的加载把内存里的标记冲掉
+    if (!editingNoteId && pendingCompletedLinesRef.current) {
+      const pending = pendingCompletedLinesRef.current;
+      pendingCompletedLinesRef.current = null;
+      if (pending.length > 0) {
+        try {
+          await setCompletedLines(note.id, pending);
+        } catch (error) {
+          showToast(getErrorMessage(error));
+        }
+      }
+    }
 
     setEditingNoteId(note.id);
     setNotes((current) => {
@@ -567,6 +638,16 @@ export function NotePad({
       if ((event.ctrlKey || event.metaKey) && event.key === "s") {
         event.preventDefault();
         void handleSaveRef.current();
+        return;
+      }
+      if (
+        padEditorActiveRef.current &&
+        (event.ctrlKey || event.metaKey) &&
+        event.shiftKey &&
+        event.key.toLowerCase() === "x"
+      ) {
+        event.preventDefault();
+        toggleCompletedLinesRef.current();
       }
     }
 
@@ -632,10 +713,7 @@ export function NotePad({
         throw new Error(t("notepad.error.copyUnsupported", { defaultValue: "当前环境不支持复制" }));
       }
       await clipboard.writeText(content);
-      // 复制不能清除磁贴勾选产生的未保存状态，否则自动保存会被取消。
-      setStatus((current) =>
-        current === "dirty" || current === "saveFailed" ? current : "copied",
-      );
+      setStatus("copied");
     } catch (error) {
       showToast(getErrorMessage(error));
     }
@@ -716,6 +794,14 @@ export function NotePad({
   };
 
   const isTile = surfaceMode === "tile";
+  padEditorActiveRef.current = surfaceMode === "pad" && mode === "new";
+  const completedSet = useMemo(() => new Set(completedLines), [completedLines]);
+  const selectionLineKeys = useMemo(
+    () => lineKeysInSelection(content, editorSelection.start, editorSelection.end),
+    [content, editorSelection],
+  );
+  const selectionCompleted =
+    selectionLineKeys.length > 0 && selectionLineKeys.every((key) => completedSet.has(key));
   const tileTitle = title.trim();
   const enterClass = hasEnteredOnce.current ? "" : "animate-window-enter";
   const surfaceWrapperClassName = `w-full h-screen flex flex-col bg-transparent p-0 ${isExiting ? "animate-window-exit" : enterClass}`;
@@ -728,12 +814,7 @@ export function NotePad({
         <Tile
           title={tileTitle || undefined}
           content={content}
-          onContentChange={(nextContent) => {
-            contentValueRef.current = nextContent;
-            setContent(nextContent);
-            statusRef.current = "dirty";
-            setStatus("dirty");
-          }}
+          completedLines={completedLines}
           color={tileColor}
           fontSize={surfaceFontSize}
           renderMarkdown={tileRenderMarkdown}
@@ -871,39 +952,88 @@ export function NotePad({
                   style={{ fontSize: `${surfaceFontSize}px` }}
                 />
 
-                <textarea
-                  ref={contentRef}
-                  data-tab-indent="true"
-                  value={content}
-                  onChange={(event) => {
-                    setContent(event.target.value);
-                    setStatus("dirty");
-                  }}
-                  onPaste={imagePasteHandler}
-                  onDrop={imageDropHandler}
-                  onDragOver={imageDragOverHandler}
-                  onKeyDown={(event) => {
-                    if (event.key === "ArrowUp") {
-                      const ta = contentRef.current;
-                      if (ta && ta.selectionStart === ta.selectionEnd) {
-                        const textBeforeCursor = content.slice(0, ta.selectionStart);
-                        if (!textBeforeCursor.includes("\n")) {
-                          event.preventDefault();
-                          titleRef.current?.focus();
+                <div className="relative flex flex-1 min-h-0">
+                  <textarea
+                    ref={contentRef}
+                    data-tab-indent="true"
+                    value={content}
+                    onChange={(event) => {
+                      setContent(event.target.value);
+                      setStatus("dirty");
+                      setEditorSelection({
+                        start: event.target.selectionStart,
+                        end: event.target.selectionEnd,
+                      });
+                    }}
+                    onSelect={(event) =>
+                      setEditorSelection({
+                        start: event.currentTarget.selectionStart,
+                        end: event.currentTarget.selectionEnd,
+                      })
+                    }
+                    onPaste={imagePasteHandler}
+                    onDrop={imageDropHandler}
+                    onDragOver={imageDragOverHandler}
+                    onKeyDown={(event) => {
+                      if (event.key === "ArrowUp") {
+                        const ta = contentRef.current;
+                        if (ta && ta.selectionStart === ta.selectionEnd) {
+                          const textBeforeCursor = content.slice(0, ta.selectionStart);
+                          if (!textBeforeCursor.includes("\n")) {
+                            event.preventDefault();
+                            titleRef.current?.focus();
+                          }
                         }
                       }
-                    }
-                  }}
-                  placeholder={t("notepad.placeholder.content", { defaultValue: "写点什么……" })}
-                  className="w-full flex-1 min-h-0 pb-2 leading-relaxed text-ink-soft font-body placeholder:text-ink-ghost/50"
-                  style={{ fontSize: `${surfaceFontSize}px`, tabSize: `var(--tab-indent-size, 2)` }}
-                />
+                    }}
+                    placeholder={t("notepad.placeholder.content", { defaultValue: "写点什么……" })}
+                    className="w-full h-full pb-2 leading-relaxed text-ink-soft font-body placeholder:text-ink-ghost/50"
+                    style={{ fontSize: `${surfaceFontSize}px`, tabSize: `var(--tab-indent-size, 2)` }}
+                  />
+                  <StrikeOverlay
+                    textareaRef={contentRef}
+                    content={content}
+                    completedLines={completedLines}
+                  />
+                </div>
 
                 <div className="flex items-center justify-between mt-auto pt-2 border-t border-paper-deep/30 shrink-0">
                   <span className="text-[11px] text-ink-ghost font-mono tabular-nums truncate max-w-[170px]">
                     {`${countNoteChars(content)} ${t("common.wordCountUnit", { defaultValue: "字" })} · ${statusLabel[status]}`}
                   </span>
                   <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleToggleCompletedLines}
+                      title={t("notepad.tooltip.toggleDone", {
+                        defaultValue: "完成 / 取消完成（划线，Ctrl+Shift+X）",
+                      })}
+                      aria-label={t("notepad.tooltip.toggleDone", {
+                        defaultValue: "完成 / 取消完成（划线，Ctrl+Shift+X）",
+                      })}
+                      aria-pressed={selectionCompleted}
+                      disabled={!content.trim()}
+                      className={`px-2 py-1.5 rounded-lg transition-all duration-200 cursor-pointer disabled:opacity-40 disabled:cursor-default ${
+                        selectionCompleted
+                          ? "text-bamboo bg-bamboo-mist"
+                          : "text-ink-faint hover:text-ink-soft hover:bg-paper-warm"
+                      }`}
+                    >
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M16 4H9a3 3 0 0 0-2.83 4" />
+                        <path d="M14 12a4 4 0 0 1 0 8H6" />
+                        <line x1="4" y1="12" x2="20" y2="12" />
+                      </svg>
+                    </button>
                     <button
                       onClick={resetDraft}
                       className="px-4 py-1.5 text-[12px] text-ink-faint hover:text-ink-soft rounded-lg hover:bg-paper-warm transition-all duration-200 cursor-pointer"

@@ -1,9 +1,13 @@
 import chroma from "chroma-js";
 import type { CSSProperties, HTMLAttributes } from "react";
-import { useMemo } from "react";
+import { Fragment, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { DEFAULT_TILE_COLOR, normalizeTileColor } from "../features/settings/tileColor";
 import { MarkdownPreviewLazy as MarkdownPreview } from "../features/markdown/MarkdownPreviewLazy";
+import {
+  isCompletedLine,
+  strikeCompletedMarkdownLines,
+} from "../features/notes/completion";
 
 export interface TileProps extends Omit<
   HTMLAttributes<HTMLDivElement>,
@@ -17,7 +21,7 @@ export interface TileProps extends Omit<
   fontSize?: number;
   renderMarkdown?: boolean;
   imageBaseDir?: string;
-  onContentChange?: (content: string) => void;
+  completedLines?: string[];
 }
 
 const MARK_SIZE = 8;
@@ -78,7 +82,7 @@ export function Tile({
   fontSize = 14,
   renderMarkdown = false,
   imageBaseDir,
-  onContentChange,
+  completedLines,
   className = "",
   style,
   children,
@@ -86,6 +90,14 @@ export function Tile({
 }: TileProps) {
   const { t } = useTranslation();
   const tileColor = normalizeTileColor(color);
+  const completed = useMemo(() => {
+    const set = new Set<string>();
+    for (const line of completedLines ?? []) {
+      const key = line.trim();
+      if (key) set.add(key);
+    }
+    return set;
+  }, [completedLines]);
   const { borderColor, cornerColor, titleColor, contentColor, emptyColor } = useMemo(() => {
     const isLightBg = chroma(tileColor).luminance() > 0.18;
     const mixTarget = isLightBg ? "#1a1a18" : "#ffffff";
@@ -125,11 +137,10 @@ export function Tile({
           renderMarkdown ? (
             <div style={{ color: contentColor }}>
               <MarkdownPreview
-                content={content}
+                content={strikeCompletedMarkdownLines(content, completed)}
                 fontSize={fontSize}
                 renderHtml={false}
                 imageBaseDir={imageBaseDir}
-                onContentChange={onContentChange}
               />
             </div>
           ) : (
@@ -137,7 +148,16 @@ export function Tile({
               className="leading-[1.8] whitespace-pre-wrap font-body"
               style={{ color: contentColor, fontSize: `${fontSize}px` }}
             >
-              {content}
+              {content.split("\n").map((line, index) => (
+                <Fragment key={index}>
+                  {index > 0 ? "\n" : null}
+                  {isCompletedLine(line, completed) ? (
+                    <span className="line-through decoration-1">{line}</span>
+                  ) : (
+                    line
+                  )}
+                </Fragment>
+              ))}
             </div>
           )
         ) : (

@@ -213,6 +213,16 @@ struct MetadataFile {
     notes: Vec<NoteMetadata>,
 }
 
+// 完成标记（删除线）不写进 .md 正文，单独存放在数据目录的 completed-lines.json：
+// 键是笔记 id，值是被划线的整行文本（去首尾空白）。这样 .md 内容保持干净，
+// 编辑器里仍显示普通文字，只是屏幕上多画一条删除线。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct CompletedLinesFile {
+    #[serde(default)]
+    notes: BTreeMap<String, Vec<String>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct NoteStore {
     config_dir: PathBuf,
@@ -877,7 +887,56 @@ impl NoteStore {
         }
         self.save_metadata(&metadata_file)?;
         let _ = self.delete_note_images(id);
+        // 笔记删除后连带清掉它的完成标记，避免 completed-lines.json 里留下孤儿条目
+        if let Ok(mut completed) = self.load_completed_lines_file() {
+            if completed.notes.remove(id).is_some() {
+                let _ = write_json_atomic(&self.completed_lines_path(), &completed);
+            }
+        }
         Ok(())
+    }
+
+    pub fn completed_lines_path(&self) -> PathBuf {
+        self.data_dir.join("completed-lines.json")
+    }
+
+    fn load_completed_lines_file(&self) -> Result<CompletedLinesFile, AppError> {
+        self.ensure_data_dir()?;
+        let path = self.completed_lines_path();
+        if !path.exists() {
+            return Ok(CompletedLinesFile::default());
+        }
+        let content = fs::read_to_string(&path)?;
+        // 损坏的标记文件不应阻塞打开笔记，直接当作没有标记处理
+        Ok(serde_json::from_str(&content).unwrap_or_default())
+    }
+
+    pub fn completed_lines(&self, note_id: &str) -> Result<Vec<String>, AppError> {
+        self.ensure_storage()?;
+        let file = self.load_completed_lines_file()?;
+        Ok(file.notes.get(note_id).cloned().unwrap_or_default())
+    }
+
+    pub fn save_completed_lines(&self, note_id: &str, lines: Vec<String>) -> Result<(), AppError> {
+        self.ensure_storage()?;
+        let mut file = self.load_completed_lines_file()?;
+        let mut cleaned: Vec<String> = Vec::with_capacity(lines.len());
+        for line in lines {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if cleaned.iter().any(|existing| existing == trimmed) {
+                continue;
+            }
+            cleaned.push(trimmed.to_string());
+        }
+        if cleaned.is_empty() {
+            file.notes.remove(note_id);
+        } else {
+            file.notes.insert(note_id.to_string(), cleaned);
+        }
+        write_json_atomic(&self.completed_lines_path(), &file)
     }
 
     pub fn images_dir(&self, note_id: &str) -> PathBuf {

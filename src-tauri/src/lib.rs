@@ -46,6 +46,17 @@ fn notes_delete(app: AppHandle, id: String) -> Result<(), AppError> {
     Ok(())
 }
 
+// 完成划线：按笔记 id 读写 completed-lines.json，不进入 .md 正文
+#[tauri::command]
+fn notes_completed_lines_get(id: String) -> Result<Vec<String>, AppError> {
+    default_store()?.completed_lines(&id)
+}
+
+#[tauri::command]
+fn notes_completed_lines_set(id: String, lines: Vec<String>) -> Result<(), AppError> {
+    default_store()?.save_completed_lines(&id, lines)
+}
+
 #[tauri::command]
 fn notes_import_markdown(
     app: AppHandle,
@@ -474,6 +485,8 @@ pub fn run() {
             notes_create,
             notes_update,
             notes_delete,
+            notes_completed_lines_get,
+            notes_completed_lines_set,
             notes_import_markdown,
             notes_export_markdown,
             notes_move_category,
